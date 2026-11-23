@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<addons>
+  <addon id="repository.streamhome" name="StreamHome Repo" version="1.0.2" provider-name="lemony18">
+    <requires>
+      <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.addon.repository" name="StreamHome">
+      <info compressed="false">https://lemony18.github.io/Streamhome/addons.xml</info>
+      <datadir zip="true">https://lemony18.github.io/Streamhome/</datadir>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+      <summary lang="sk_SK">Repo pre StreamHome</summary>
+      <description lang="sk_SK">Repozitar doplnkov StreamHome.</description>
+      <platform>all</platform>
+      <license>GPL-2.0-only</license>
+    </extension>
+  </addon>
+  <addon id="plugin.video.mojekino" name="MojeKino" version="0.4.5" provider-name="lemony18">
+    <requires>
+      <import addon="xbmc.python" version="3.0.0"/>
+    </requires>
+    <extension point="xbmc.python.pluginsource" library="main.py">
+      <provides>video</provides>
+    </extension>
+    <extension point="xbmc.addon.metadata">
+      <summary lang="sk_SK">Osobne kino nad Webshare</summary>
+      <description lang="sk_SK">Vyhladavanie a prehravanie z vlastneho Webshare uctu.</description>
+      <platform>all</platform>
+      <license>GPL-2.0-only</license>
+    </extension>
+  </addon>
+</addons>
