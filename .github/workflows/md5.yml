@@ -1,0 +1,19 @@
+name: md5
+on:
+  push:
+    paths:
+      - addons.xml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: md5sum addons.xml | cut -d' ' -f1 > addons.xml.md5
+      - run: |
+          git config user.name bot
+          git config user.email bot@local
+          git add addons.xml.md5
+          git commit -m "md5" || true
+          git push
