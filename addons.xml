@@ -19,7 +19,7 @@
       <license>GPL-2.0-only</license>
     </extension>
   </addon>
-  <addon id="plugin.video.mojekino" name="MojeKino" version="0.5.4" provider-name="lemony18">
+  <addon id="plugin.video.mojekino" name="MojeKino" version="0.5.5" provider-name="lemony18">
     <requires>
       <import addon="xbmc.python" version="3.0.0"/>
     </requires>
