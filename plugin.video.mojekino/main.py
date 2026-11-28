@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+ # -*- coding: utf-8 -*-
 import sys, os, re, json, time, hashlib, uuid, socket, unicodedata
 import urllib.parse, urllib.request, urllib.error
 import xml.etree.ElementTree as ET
@@ -32,10 +32,15 @@ ITOA64 = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 GENRES = [(28, 'Akcia'), (12, 'Dobrodružné'), (16, 'Animované'), (35, 'Komédia'),
           (80, 'Krimi'), (18, 'Dráma'), (27, 'Horor'), (10749, 'Romantické'),
           (878, 'Sci-fi'), (53, 'Thriller'), (99, 'Dokument'), (14, 'Fantasy')]
-QORDER = {'2160': 3, '1080' I: 2, '720': 1, '480': 0}
+QORDER = {'2160': 3, '1080': 2, '720': 1, '480': 0}
 
-KRA_BASE = 'https://stream-cinema.online/kodi'
 KRA_API = 'https://api.kra.sk'
+KRA_BASES = ['https://stream-cinema.online/kodi',
+             'https://stream-cinema.online/json',
+             'https://beta.plugin.sc2.zone/api',
+             'https://plugin.sc2.zone/api',
+             'https://api.kra.sk/api']
+KRA_VER = '1.3'
 
 
 def _to64(v, n):
@@ -54,7 +59,7 @@ def md5crypt(pw, salt):
         salt = salt.encode()
     salt = salt.split(b'$', 1)[0][:8]
     ctx = bytearray(pw + b'$1$' + salt)
-    final = hashlib.md5(pw + sal ||/t + pw).digest()
+    final = hashlib.md5(pw + salt + pw).digest()
     for pl in range(len(pw), 0, -16):
         ctx.extend(final[:min(pl, 16)])
     i = len(pw)
@@ -102,6 +107,7 @@ def conf():
     c.setdefault('maxsrc', 12)
     c.setdefault('kra_user', '')
     c.setdefault('kra_pass', '')
+    c.setdefault('kra_base', '')
     return c
 
 
@@ -198,21 +204,23 @@ class Ws:
                 continue
             if root.findtext('status') == 'OK':
                 return root
-            err = root.findtext('error') or 'unknown'
-            if err == 'Too many requests' and a < retries - 1:
+            er = root.findtext('error') or 'unknown'
+            if er == 'Too many requests' and a < retries - 1:
                 time.sleep(BACKOFF[min(a, len(BACKOFF) - 1)])
                 continue
-            raise WsError(err)
+            raise WsError(er)
         raise WsError('network')
 
     def login(self):
         if self.tok:
             return self.tok
-        salt = self._call('salt', {'username_or_email': self.user}).findtext('salt')
+        ud = {'username_or_email': self.user}
+        salt = self._call('salt', ud).findtext('salt')
         enc = hashlib.sha1(md5crypt(self.pw, salt).encode()).hexdigest()
         digest = hashlib.md5((self.user + REALM + enc).encode()).hexdigest()
-        tok = self._call('login', {'username_or_email': self.user, 'password': enc,
-                                   'digest': digest, 'keep_logged_in': 1}).findtext('token')
+        ld = {'username_or_email': self.user, 'password': enc,
+              'digest': digest, 'keep_logged_in': 1}
+        tok = self._call('login', ld).findtext('token')
         if not tok:
             raise WsError('login', 'bez tokenu')
         self.tok = tok
@@ -236,14 +244,19 @@ class Ws:
 
     def play_url(self, ident, password=None):
         self.login()
-        if self._call('file_protected', {'ident': ident, 'wst': self.tok}).findtext('protected') == '1' and not password:
+        pd = {'ident': ident, 'wst': self.tok}
+        prot = self._call('file_protected', pd).findtext('protected')
+        if prot == '1' and not password:
             raise WsError('protected', 'heslo')
         data = {'ident': ident, 'wst': self.tok, 'download_type': 'video_stream',
                 'device_uuid': _addon.getSetting('duuid')}
         if password:
-            salt = self._call('file_password_salt', {'ident': ident, 'wst': self.tok}).findtext('salt')
-            data['password'] = (hashlib.sha1(md5crypt(password, salt).encode()).hexdigest()
-                                if salt else password)
+            salt = self._call('file_password_salt', pd).findtext('salt')
+            if salt:
+                data['password'] = hashlib.sha1(
+                    md5crypt(password, salt).encode()).hexdigest()
+            else:
+                data['password'] = password
         link = self._call('file_link', data).findtext('link')
         if not link:
             raise WsError('link', 'prazdny')
@@ -279,87 +292,15 @@ def kra_http(url, payload=None, extra=None):
     except urllib.error.HTTPError as e:
         snip = ''
         try:
-            snip = e.read().decode('utf-8', 'replace')[:400].replace('\n', ' ')
+            snip = e.read().decode('utf-8', 'replace')[:300].replace('\n', ' ')
         except Exception:
             pass
         xbmc.log('MKRA http %d %s :: %s' % (e.code, url, snip), xbmc.LOGWARNING)
         if e.code in (502, 503, 504):
-            raise KraError('kra.sk práve neodpovedá (%d), skús neskôr' % e.code)
-        raise KraError('HTTP %d @ %s :: %s' % (e.code, url.split('?')[0], snip[:220]))
+            raise KraError('kra.sk práve neodpovedá (%d)' % e.code)
+        raise KraError('HTTP %d @ %s :: %s' % (e.code, url.split('?')[0], snip[:150]))
     except (urllib.error.URLError, socket.timeout) as e:
         raise KraError('sieť: %s' % str(e)[:80])
-
-
-def kra_probe():
-    out = []
-    c = conf()
-    uid = kra_uid()
-    out.append('user=%s pass=%s' % ('ano' if c.get('kra_user') else 'nie',
-                                    'ano' if c.get('kra_pass') else 'nie'))
-
-    def raw(label, url, extra=None, payload=None):
-        h = {'User-Agent': UA, 'Accept': 'application/json',
-             'Content-Type': 'application/json', 'X-Uuid': uid}
-        if extra:
-            h.update(extra)
-        body = json.dumps(payload).encode() if payload is not None else None
-        req = urllib.request.Request(url, data=body, headers=h,
-                                     method='POST' if body else 'GET')
-        try:
-            with urllib.request.urlopen(req, timeout=20) as r:
-                t = r.read().decode('utf-8', 'replace')
-                out.append('%s -> %d | %s' % (label, r.code, t[:150].replace('\n', ' ')))
-                return t
-        except urllib.error.HTTPError as e:
-            try:
-                t = e.read().decode('utf-8', 'replace')
-            except Exception:
-                t = ''
-            out.append('%s -> %d | %s' % (label, e.code, t[:150].replace('\n', ' ')))
-            return ''
-        except Exception as e:
-            out.append('%s -> ERR | %s' % (label, str(e)[:110]))
-            return ''
-
-    r = raw('1 login', KRA_API + '/api/user/login',
-            payload={'data': {'username': c.get('kra_user'),
-                              'password': c.get('kra_pass')}})
-    sid = ''
-    try:
-        sid = json.loads(r).get('session_id') or ''
-    except Exception:
-        pass
-    tok = ''
-    if sid:
-        r2 = raw('2 token', KRA_BASE + '/auth/token?krt=' +
-                 urllib.parse.quote(sid) + '&ver=2.0&uid=' + uid + '&lang=sk')
-        try:
-            tok = json.loads(r2).get('token') or ''
-        except Exception:
-            pass
-    out.append('token: %s' % ('ANO' if tok else 'ZIADNY'))
-    hx = {'X-AUTH-TOKEN': tok} if tok else {}
-    prm = '?ver=2.0&uid=' + uid + '&lang=sk'
-
-    tests = [
-        ('3 kodi root', KRA_BASE + '/' + prm),
-        ('4 kodi menu', KRA_BASE + '/menu.0.json'),
-        ('5 kodi popular', KRA_BASE + '/media/movies/popular/-1' + prm),
-        ('6 kodi movies', KRA_BASE + '/media/movies' + prm),
-        ('7 kodi search', KRA_BASE + '/Search/search-movies?search=adidas&ver=2.0&uid=' + uid + '&lang=sk'),
-        ('8 api menu', KRA_API + '/api/menu' + prm),
-        ('9 api popular', KRA_API + '/api/media/movies/popular/-1' + prm),
-        ('A api movies', KRA_API + '/api/media/movies' + prm),
-        ('B api tvshows', KRA_API + '/api/media/tvshows' + prm),
-        ('C api search', KRA_API + '/api/search/search-movies?search=adidas&ver=2.0&uid=' + uid + '&lang=sk'),
-        ('D api filter', KRA_API + '/api/media/movies/filter/titleOrActor/adidas' + prm),
-    ]
-    for label, url in tests:
-        raw(label, url, hx)
-
-    txt = '\n'.join(out)
-    xbmc.log('=== MKRA PROBE3 ===\n' + txt, xbmc.LOGWARNING)
-    xbmcgui.Dialog().textviewer('Diagnostika kra.sk 3', txt)
 
 
 def kra_login():
@@ -372,64 +313,99 @@ def kra_login():
     sid = r.get('session_id')
     if not sid:
         raise KraError('prihlásenie na kra.sk zlyhalo')
-    uid = kra_uid()
-    r2 = kra_http(KRA_BASE + '/auth/token?krt=' + urllib.parse.quote(sid) +
-                  '&ver=2.0&uid=' + uid + '&lang=sk', extra={'X-Uuid': uid})
-    tok = r2.get('token')
-    if not tok:
-        raise KraError('token nebol vydaný (možno čaká na schválenie)')
     c = conf()
     c['kra_sid'] = sid
-    c['kra_token'] = tok
     c['kra_ts'] = time.time()
     jsave(_conf_file, c)
-    return tok
+    return sid
 
 
-def kra_auth(force=False):
+def kra_sid(force=False):
     c = conf()
-    if not force and c.get('kra_token'):
-        return c['kra_token']
+    if not force and c.get('kra_sid'):
+        return c['kra_sid']
     return kra_login()
 
 
-def kra_get(path, params=None):
-    last = 'chyba'
-    for attempt in (0, 1):
-        tok = kra_auth(force=attempt == 1)
-        prm = {'ver': '2.0', 'uid': kra_uid(), 'lang': 'sk'}
-        if params:
-            prm.update(params)
-        url = KRA_BASE + path + '?' + urllib.parse.urlencode(prm)
-        try:
-            d = kra_http(url, extra={'X-Uuid': kra_uid(), 'X-AUTH-TOKEN': tok})
-        except KraError as e:
-            last = str(e)
-            if 'HTTP 40' in last and attempt == 0:
-                continue
-            raise
-        if 'error' in d:
-            last = str(d.get('error'))
-            if attempt == 0:
-                continue
-            raise KraError(last)
-        sysd = d.get('system') or {}
-        if 'msgERROR' in sysd:
-            m = sysd['msgERROR']
-            if isinstance(m, dict):
-                i18 = m.get('i18n') or {}
-                m = i18.get('sk') or i18.get('cs') or 'chyba'
-            raise KraError(str(m))
-        return d
-    raise KraError(last)
-
-
-def kra_link(ident):
-    c = conf()
-    sid = c.get('kra_sid')
-    if not sid:
-        kra_login()
+def kra_prm(extra=None):
+    prm = {'ver': KRA_VER, 'uid': kra_uid(), 'lang': 'sk', 'v': '0.5.6'}
+    try:
         sid = conf().get('kra_sid')
+        if sid:
+            prm['session_id'] = sid
+    except Exception:
+        pass
+    if extra:
+        prm.update(extra)
+    return prm
+
+
+def kra_bases():
+    c = conf()
+    first = c.get('kra_base')
+    out = [first] if first else []
+    for b in KRA_BASES:
+        if b not in out:
+            out.append(b)
+    return out
+
+
+def kra_get(path, params=None):
+    if not conf().get('kra_sid'):
+        kra_sid()
+    errs = []
+    for b in kra_bases():
+        url = b.rstrip('/') + path
+        url += '?' + urllib.parse.urlencode(kra_prm(params))
+        try:
+            d = kra_http(url, extra={'X-Uuid': kra_uid()})
+        except KraError as e:
+            errs.append('%s -> %s' % (b, str(e)[:80]))
+            continue
+        if isinstance(d, dict) and ('menu' in d or 'strms' in d):
+            c = conf()
+            if c.get('kra_base') != b:
+                c['kra_base'] = b
+                jsave(_conf_file, c)
+            sysd = d.get('system') or {}
+            if 'msgERROR' in sysd:
+                m = sysd['msgERROR']
+                if isinstance(m, dict):
+                    i18 = m.get('i18n') or {}
+                    m = i18.get('sk') or i18.get('cs') or 'chyba'
+                raise KraError(str(m))
+            return d
+        errs.append('%s -> bez menu' % b)
+    raise KraError('katalóg nedostupný | ' + ' | '.join(errs)[:260])
+
+
+def kra_ident(p):
+    if not p:
+        return ''
+    if p.startswith('http'):
+        d = kra_http(p + ('&' if '?' in p else '?') +
+                     urllib.parse.urlencode(kra_prm()),
+                     extra={'X-Uuid': kra_uid()})
+    else:
+        d = kra_get(p)
+    if not isinstance(d, dict):
+        return ''
+    ident = d.get('ident')
+    if not ident:
+        ident = (d.get('data') or {}).get('ident')
+    if not ident:
+        for s in d.get('strms') or []:
+            if s.get('ident'):
+                ident = s['ident']
+                break
+    return ident or ''
+
+
+def kra_link(p):
+    sid = conf().get('kra_sid') or kra_sid()
+    ident = kra_ident(p)
+    if not ident:
+        raise KraError('ident sa nenašiel')
     try:
         ui = kra_http(KRA_API + '/api/user/info', {'session_id': sid})
         dl = (ui.get('data') or {}).get('days_left')
@@ -447,16 +423,44 @@ def kra_link(ident):
     return link
 
 
+def kra_probe():
+    out = []
+    c = conf()
+    out.append('user=%s pass=%s sid=%s' % (
+        'ano' if c.get('kra_user') else 'nie',
+        'ano' if c.get('kra_pass') else 'nie',
+        'ano' if c.get('kra_sid') else 'nie'))
+    try:
+        kra_login()
+        out.append('login OK')
+    except Exception as e:
+        out.append('login FAIL: %s' % str(e)[:150])
+        xbmcgui.Dialog().textviewer('Diagnostika kra.sk 4', '\n'.join(out))
+        return
+    for b in kra_bases():
+        for p in ('/', '/menu', '/movies'):
+            url = b.rstrip('/') + p + '?' + urllib.parse.urlencode(kra_prm())
+            try:
+                d = kra_http(url, extra={'X-Uuid': kra_uid()})
+                k = 'menu' if isinstance(d, dict) and 'menu' in d else 'json'
+                out.append('%s%s -> OK %s' % (b, p, k))
+            except Exception as e:
+                out.append('%s%s -> %s' % (b, p, str(e)[:70]))
+    txt = '\n'.join(out)
+    xbmc.log('=== MKRA PROBE4 ===\n' + txt, xbmc.LOGWARNING)
+    xbmcgui.Dialog().textviewer('Diagnostika kra.sk 4', txt)
+
+
 def kra_render(d, cur):
-    if cur == '/':
+    if cur in ('/', ''):
         add('Hľadať na kra.sk', 'krasearch', folder=True, art={'icon': _icon})
     strms = d.get('strms')
     if strms:
         for s in sorted(strms, key=lambda x: -QORDER.get(str(x.get('quality') or ''), 0)):
-            label = '%s · %s · %s' % (s.get('quality') or '?',
-                                      s.get('lang') or '', s.get('size') or '')
+            q = s.get('quality') or '?'
+            label = '%s · %s · %s' % (q, s.get('lang') or '', s.get('size') or '')
             add(label.strip(' ·'), 'krastream',
-                {'ident': s.get('ident') or '', 'subs': s.get('subs') or ''},
+                {'p': s.get('url') or s.get('ident') or ''},
                 folder=False, play=True,
                 info={'plot': (s.get('title') or '')[:200]})
         return
@@ -468,10 +472,17 @@ def kra_render(d, cur):
             continue
         if t == 'next':
             title = 'Ďalšia strana'
+        art = it.get('art') or {}
+        if isinstance(art, str):
+            art = {'icon': art}
+        art.setdefault('icon', _icon)
         info = it.get('info') or {}
-        add(title, 'krabrowse', {'p': url}, folder=True,
-            art=it.get('art') or {'icon': _icon},
-            info={'plot': (info.get('plot') or '')[:300]})
+        if t == 'video':
+            add(title, 'krastream', {'p': url}, folder=False, play=True, art=art,
+                info={'plot': (info.get('plot') or '')[:300]})
+        else:
+            add(title, 'krabrowse', {'p': url}, folder=True, art=art,
+                info={'plot': (info.get('plot') or '')[:300]})
 
 
 def tmdb(path, **params):
@@ -554,7 +565,8 @@ def collect_sources(w, titles, year):
             scored.append((sc, f))
     scored.sort(key=lambda x: -x[0])
     minq = conf().get('minq', '1080')
-    top = [x for x in scored if QORDER.get(quality(x[1]['name']), 0) >= QORDER.get(minq, 2)]
+    lim = QORDER.get(minq, 2)
+    top = [x for x in scored if QORDER.get(quality(x[1]['name']), 0) >= lim]
     return (top or scored)[:int(conf().get('maxsrc', 12))]
 
 
@@ -597,13 +609,17 @@ def media_list(items, kind):
     for it in items:
         y = (it.get('release_date') or it.get('first_air_date') or '')[:4]
         title = it.get('title') or it.get('name')
-        art = {'poster': IMG + it['poster_path']} if it.get('poster_path') else {'icon': _icon}
+        if it.get('poster_path'):
+            art = {'poster': IMG + it['poster_path']}
+        else:
+            art = {'icon': _icon}
         prm = {'t': title, 'y': y, 'kind': kind}
         if it.get('original_title') or it.get('original_name'):
             prm['ot'] = it.get('original_title') or it.get('original_name')
         in_lib = lib_key(kind, title, y) in lib_all()
-        ctx = [(('Odobrať z knižnice' if in_lib else 'Do knižnice'),
-                'RunPlugin(%s?action=libtoggle&%s)' % (_url, urllib.parse.urlencode(prm)))]
+        lbl = 'Odobrať z knižnice' if in_lib else 'Do knižnice'
+        ctx = [(lbl, 'RunPlugin(%s?action=libtoggle&%s)' %
+                (_url, urllib.parse.urlencode(prm)))]
         add('%s (%s)' % (title, y or '?'), 'sources', prm, folder=True, art=art,
             info={'plot': it.get('overview', '')[:400],
                   'year': int(y) if y.isdigit() else 0}, ctx=ctx)
@@ -628,7 +644,8 @@ try:
         xbmcplugin.endOfDirectory(H)
 
     elif action == 'genre':
-        data = tmdb('/discover/movie', with_genres=q['id'], sort_by='popularity.desc', page=page)
+        data = tmdb('/discover/movie', with_genres=q['id'],
+                    sort_by='popularity.desc', page=page)
         media_list(data.get('results', []), 'movie')
         if page < data.get('total_pages', 1) and page < 20:
             add('Ďalšia strana', 'genre', {'id': q['id'], 'page': page + 1})
@@ -638,7 +655,8 @@ try:
         data = tmdb('/' + q['p'], page=page)
         media_list(data.get('results', []), q.get('kind', 'movie'))
         if page < data.get('total_pages', 1) and page < 20:
-            add('Ďalšia strana', 'list', {'p': q['p'], 'kind': q.get('kind'), 'page': page + 1})
+            add('Ďalšia strana', 'list',
+                {'p': q['p'], 'kind': q.get('kind'), 'page': page + 1})
         xbmcplugin.endOfDirectory(H)
 
     elif action == 'search':
@@ -666,17 +684,11 @@ try:
         xbmcplugin.endOfDirectory(H)
 
     elif action == 'krastream':
-        ident = q.get('ident')
-        if not ident:
+        p = q.get('p')
+        if not p:
             xbmcplugin.setResolvedUrl(H, False, xbmcgui.ListItem())
             sys.exit()
-        li = xbmcgui.ListItem(path=kra_link(ident))
-        subs = q.get('subs') or ''
-        if '/file/' in subs:
-            try:
-                li.setSubtitles([kra_link(subs.split('/file/')[-1].strip('/'))])
-            except Exception:
-                pass
+        li = xbmcgui.ListItem(path=kra_link(p))
         xbmcplugin.setResolvedUrl(H, True, li)
 
     elif action == 'libtoggle':
@@ -699,12 +711,14 @@ try:
         if not lib:
             add('— knižnica je prázdna —', 'library')
         for k, e in sorted(lib.items(), key=lambda x: -x[1].get('added', 0)):
-            prm = {'t': e['t'], 'y': e.get('y', ''), 'kind': e['kind'], 'id': e.get('id', '')}
+            prm = {'t': e['t'], 'y': e.get('y', ''), 'kind': e['kind'],
+                   'id': e.get('id', '')}
             art = {'poster': e['poster']} if e.get('poster') else {'icon': _icon}
-            ctx = [(('Označiť ako nevidené' if e.get('seen') else 'Označiť ako videné'),
-                    'RunPlugin(%s?action=seen&%s)' % (_url, urllib.parse.urlencode(prm))),
-                   ('Odobrať z knižnice',
-                    'RunPlugin(%s?action=libtoggle&%s)' % (_url, urllib.parse.urlencode(prm)))]
+            l1 = 'Označiť ako nevidené' if e.get('seen') else 'Označiť ako videné'
+            ctx = [(l1, 'RunPlugin(%s?action=seen&%s)' %
+                    (_url, urllib.parse.urlencode(prm))),
+                   ('Odobrať z knižnice', 'RunPlugin(%s?action=libtoggle&%s)' %
+                    (_url, urllib.parse.urlencode(prm)))]
             add(e['t'], 'sources', prm, folder=True, art=art,
                 info={'playcount': e.get('seen', 0),
                       'year': int(e['y']) if e.get('y', '').isdigit() else 0}, ctx=ctx)
@@ -764,8 +778,10 @@ try:
         data = tmdb('/tv/%s/season/%s' % (q['id'], q['s']))
         for e in data.get('episodes', []):
             add('%02d. %s' % (e['episode_number'], e.get('name') or ''),
-                'sources', {'t': '%s S%02dE%02d' % (q['t'], int(q['s']), e['episode_number']),
-                            'y': (e.get('air_date') or '')[:4], 'kind': 'tv', 'id': q['id']},
+                'sources', {'t': '%s S%02dE%02d' % (q['t'], int(q['s']),
+                                                    e['episode_number']),
+                            'y': (e.get('air_date') or '')[:4],
+                            'kind': 'tv', 'id': q['id']},
                 folder=True, info={'plot': (e.get('overview') or '')[:300]})
         xbmcplugin.endOfDirectory(H)
 
@@ -786,9 +802,11 @@ try:
             w.play_url(ident)
         except WsError as e:
             if e.code == 'protected':
-                pw = xbmcgui.Dialog().input('Heslo k súboru', option=xbmcgui.ALPHANUM_HIDE_INPUT)
+                pw = xbmcgui.Dialog().input('Heslo k súboru',
+                                            option=xbmcgui.ALPHANUM_HIDE_INPUT)
         try:
-            xbmcplugin.setResolvedUrl(H, True, xbmcgui.ListItem(path=w.play_url(ident, pw)))
+            xbmcplugin.setResolvedUrl(H, True,
+                                      xbmcgui.ListItem(path=w.play_url(ident, pw)))
         except WsError as e:
             err(e)
             xbmcplugin.setResolvedUrl(H, False, xbmcgui.ListItem())
@@ -802,17 +820,18 @@ try:
         mq = d.input('Kvalita: 2160 / 1080 / 720 / 480', defaultt=c['minq'])
         if mq in ('2160', '1080', '720', '480'):
             c['minq'] = mq
-        ku = d.input('kra.sk užívateľ (prázdne = nezmeniť)', defaultt=c.get('kra_user', ''))
+        ku = d.input('kra.sk užívateľ (prázdne = nezmeniť)',
+                     defaultt=c.get('kra_user', ''))
         if ku != c.get('kra_user', ''):
             c['kra_user'] = ku
-            c['kra_token'] = ''
             c['kra_sid'] = ''
+            c['kra_base'] = ''
         kp = d.input('kra.sk heslo (prázdne = nezmeniť)',
                      defaultt=c.get('kra_pass', ''), option=xbmcgui.ALPHANUM_HIDE_INPUT)
         if kp != c.get('kra_pass', ''):
             c['kra_pass'] = kp
-            c['kra_token'] = ''
             c['kra_sid'] = ''
+            c['kra_base'] = ''
         jsave(_conf_file, c)
         d.ok('Nastavenia', 'Uložené: %s / %s' % (c['pref'], c['minq']))
 
